@@ -1,0 +1,275 @@
+---
+# Heat stack with VPC, BastionServer, AWX
+
+heat_template_version: 2016-04-08
+
+description:
+  AWX Server template
+
+parameters:
+
+  # external_network:
+  #   type: string
+  #   description: >
+  #     The external network that provides floating IP addresses for the nodes
+  #   default: admin_external_net
+  #   constraints:
+  #   - custom_constraint: neutron.network
+
+  net:
+    description: >
+      The name or ID of the internal network
+    type: string
+    constraints:
+    - custom_constraint: neutron.network
+
+  subnet:
+    description: >
+      The name or ID of the internal subnet
+    type: string
+    constraints:
+    - custom_constraint: neutron.subnet
+
+  security_groups:
+    description: List of security groups
+    type: comma_delimited_list
+
+  hostname:
+    description: The hostname
+    type: string
+    # default: awx
+
+  domain_name:
+    type: string
+    description: >
+      Domain name for instances
+    # default: test.com
+
+  flavor:
+    type: string
+    description: >
+      Flavor for the server
+    # default: s2.large.1
+    constraints:
+      - custom_constraint: nova.flavor
+
+  image:
+    type: string
+    description: >
+      Image for the server
+    # default: Standard_Fedora_29_latest
+    constraints:
+      - custom_constraint: glance.image
+
+  keypair_name:
+    type: string
+    description: >
+      KeyPair for the server
+    constraints:
+      - custom_constraint: nova.keypair
+
+  root_volume_size:
+    type: number
+    description: >
+      Size of the root partition for server
+    # default: 10
+    constraints:
+
+  ssh_user:
+    type: string
+    description: >
+      SSH user for the connection to the server
+    # default: linux
+
+  metadata:
+    type: json
+    description: server metadata
+
+  common_role_name:
+    type: string
+    description: Ansible-galaxy name of the common role
+
+  awx_config_repo:
+    type: string
+    description: git repo of the AWX configuration (will be polled periodically)
+    # default: "https://github.com/opentelekomcloud-infra/awx"
+
+resources:
+
+  server:
+    type: Heat::OTC::Server
+    properties:
+      hostname: { get_param: hostname }
+      domain_name: { get_param: domain_name }
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      keypair_name: { get_param: keypair_name }
+      root_volume_size: { get_param: root_volume_size }
+      metadata: { get_param: metadata }
+      subnet: { get_param: subnet }
+      network: { get_param: net }
+      security_groups: { get_param: security_groups }
+
+  roles_apply_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ansible
+      inputs:
+        - name: common_role_name
+        - name: config_repo
+      config: |
+        ---
+        - name: Apply AWX Role
+          hosts: localhost
+          connection: local
+          roles:
+            - { role: '{{common_role_name}}' }
+          tasks:
+            - name: Install cronie
+              package:
+                name: "cronie"
+                state: present
+            - name: enable cron
+              service:
+                name: crond
+                enabled: yes
+                state: started
+            - name: Enable self-polling of configuration
+              cron:
+                name: "ansible_config_poll"
+                minute: "*/2"
+                state: present
+                job: "ansible-pull -d ~workspace/pull_dir -U {{config_repo}} -o -e @~/awx_inventory_vars.yaml"
+
+  roles_apply_deployment:
+    type: OS::Heat::SoftwareDeployment
+    depends_on: prepare_awx_installer_deployment
+    properties:
+      name: roles_apply_deployment
+      signal_transport: TEMP_URL_SIGNAL
+      config: { get_resource: roles_apply_config }
+      input_values:
+        common_role_name: { get_param: common_role_name }
+        config_repo: { get_param: awx_config_repo }
+      server: { get_attr: [ server, id ] }
+
+  prepare_awx_installer_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      inputs:
+        - name: username
+        - name: role
+      outputs:
+        - name: awx_ssh_pub_key
+      config: |
+        #!/bin/bash -x
+
+        mkdir -p ~${username}/workspace
+        git clone https://github.com/ansible/awx.git ~${username}/workspace/awx
+        chown -R ${username}:root ~${username}/workspace
+        ansible-galaxy install $role
+
+        if [ ! -f ~/.ssh/id_rsa ]; then
+          ssh-keygen -t rsa -N '' -f ~/.ssh/is_rsa
+        fi
+
+        cat ~/.ssh/is_rsa.pub > $heat_outputs_path.awx_ssh_pub_key
+
+  prepare_awx_installer_deployment:
+    type: OS::Heat::SoftwareDeployment
+    depends_on: server
+    properties:
+      name: prepare_awx_installer_deployment
+      signal_transport: TEMP_URL_SIGNAL
+      config: { get_resource: prepare_awx_installer_config }
+      input_values:
+        username: { get_param: ssh_user }
+        role: { get_param: common_role_name }
+      server: { get_attr: [ server, id ] }
+
+  loadbalancer:
+    type: OS::Neutron::LBaaS::LoadBalancer
+    properties:
+      name:
+        str_replace:
+          template: "elb.DOMAIN"
+          params:
+            DOMAIN: { get_param: domain_name }
+      description: AWX load-balancer
+      vip_subnet: { get_param: subnet }
+
+  lb_listener_awx_80:
+    type: OS::Neutron::LBaaS::Listener
+    properties:
+      name: lsnr-awx-80
+      description: Listener for the AWX:80
+      loadbalancer: { get_resource: loadbalancer }
+      protocol: TCP
+      protocol_port: 80
+
+  # HEAT@otc does not support HTTPS, TERMINATED_HTTPS
+  lb_listener_awx_443:
+    type: OS::Neutron::LBaaS::Listener
+    properties:
+      name: lsnr-awx-443
+      description: Listener for the AWX:443
+      loadbalancer: { get_resource: loadbalancer }
+      protocol: TCP
+      protocol_port: 443
+
+  lb_pool_awx_80:
+    type: OS::Neutron::LBaaS::Pool
+    properties:
+      description: Pool for the AWX:80
+      lb_algorithm: ROUND_ROBIN
+      protocol: TCP
+      listener: { get_resource: lb_listener_awx_80 }
+      session_persistence: { "type": "SOURCE_IP" }
+
+  lb_pool_awx_443:
+    type: OS::Neutron::LBaaS::Pool
+    properties:
+      description: Pool for the AWX:443
+      lb_algorithm: ROUND_ROBIN
+      protocol: TCP
+      listener: { get_resource: lb_listener_awx_443 }
+      session_persistence: { "type": "SOURCE_IP" }
+
+  lb_pool_80_member:
+    type: OS::Neutron::LBaaS::PoolMember
+    properties:
+      pool: { get_resource: lb_pool_awx_80 }
+      address: { get_attr: [ server, private_ip ] }
+      protocol_port: 80
+      subnet: { get_param: subnet }
+
+  lb_pool_443_member:
+    type: OS::Neutron::LBaaS::PoolMember
+    properties:
+      pool: { get_resource: lb_pool_awx_443 }
+      address: { get_attr: [ server, private_ip ] }
+      protocol_port: 443
+      subnet: { get_param: subnet }
+
+outputs:
+  OS::stack_id:
+    value: { get_resource: server }
+  server:
+    description: AWX server information
+    value: { get_attr: [ server ] }
+  awx_ssh_pub_key:
+    description: SSH key of the AWX root user (will be used by ansible polls)
+    value: { get_attr: [prepare_awx_installer_deployment, awx_ssh_pub_key] }
+  roles_apply_deployment:
+    description: Output of the roles_apply deployment
+    value:
+      deploy_status_code: { get_attr: [roles_apply_deployment, deploy_status_code] }
+      deploy_stderr: { get_attr: [roles_apply_deployment, deploy_stderr] }
+      deploy_stdout: { get_attr: [roles_apply_deployment, deploy_stdout] }
+  prepare_awx_installer_deployment:
+    value:
+      description: Output of the prepare_awx_installer deployment
+      deploy_status_code: { get_attr: [prepare_awx_installer_deployment, deploy_status_code] }
+      deploy_stderr: { get_attr: [prepare_awx_installer_deployment, deploy_stderr] }
+      deploy_stdout: { get_attr: [prepare_awx_installer_deployment, deploy_stdout] }

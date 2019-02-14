@@ -1,0 +1,74 @@
+---
+heat_template_version: 2016-04-08
+
+description:
+  Security groups for AWX
+
+parameters:
+
+resources:
+
+  bastion-secgrp:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Bastion security group for AWX
+      rules:
+        - {"direction": "ingress", "remote_mode": "remote_group_id"}
+        - {"protocol": "icmp", "direction": "ingress", "remote_ip_prefix": "0.0.0.0/0"}
+        - {"protocol": "tcp", "direction": "ingress", "port_range_min": 22, "port_range_max": 22, "remote_ip_prefix": "0.0.0.0/0"}
+
+  common-secgrp:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Common security group for Servers behind Bastion in AWX
+      rules:
+        - {"direction": "ingress", "remote_mode": "remote_group_id"}
+        - {"protocol": "icmp", "direction": "ingress", "remote_mode": "remote_group_id", "remote_group_id": {get_resource: bastion-secgrp}}
+        - {"protocol": "tcp",  "direction": "ingress", "port_range_min": 22, "port_range_max": 22, "remote_mode": "remote_group_id", "remote_group_id": {get_resource: bastion-secgrp}}
+
+  proxy-secgrp:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Security group for Proxy server in AWX
+      rules:
+        - {"direction": "ingress", "remote_mode": "remote_group_id"}
+        - {"protocol": "tcp", "direction": "ingress", "port_range_min": 80, "port_range_max": 80}
+        - {"protocol": "tcp", "direction": "ingress", "port_range_min": 443, "port_range_max": 443}
+
+  awx-secgrp:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Security group for AWX server in AWX
+      rules:
+        - {"direction": "ingress", "remote_mode": "remote_group_id"}
+        - {"protocol": "tcp", "direction": "ingress", "port_range_min": 80, "port_range_max": 80, "remote_mode": "remote_group_id", "remote_group_id": {get_resource: proxy-secgrp}}
+        - {"protocol": "tcp", "direction": "ingress", "port_range_min": 443, "port_range_max": 443, "remote_mode": "remote_group_id", "remote_group_id": {get_resource: proxy-secgrp}}
+
+  pg-secgrp:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Bastion security group for AWX
+      rules:
+        - {"direction": "ingress", "remote_mode": "remote_group_id"}
+        - {"protocol": "tcp", "direction": "ingress", "port_range_min": 5432, "port_range_max": 5432, "remote_ip_prefix": "0.0.0.0/0"}
+
+outputs:
+  bastion-secgrp:
+    description: Bastion security group
+    value: { get_resource: bastion-secgrp }
+
+  common-secgrp:
+    description: Common security group
+    value: { get_resource: common-secgrp }
+
+  proxy-secgrp:
+    description: Proxy security group
+    value: { get_resource: proxy-secgrp }
+
+  awx-secgrp:
+    description: AWX security group
+    value: { get_resource: awx-secgrp }
+
+  pg-secgrp:
+    description: PostgreSQL security group
+    value: { get_resource: pg-secgrp }

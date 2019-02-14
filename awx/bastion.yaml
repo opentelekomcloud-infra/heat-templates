@@ -1,0 +1,189 @@
+---
+# Heat stack with VPC, BastionServer, AWX
+
+heat_template_version: 2016-04-08
+
+description:
+  Bastion Server template
+
+parameters:
+
+  external_network:
+    type: string
+    description: >
+      The external network that provides floating IP addresses for the nodes
+    default: admin_external_net
+    constraints:
+    - custom_constraint: neutron.network
+
+  net:
+    description: >
+      The name or ID of the internal network
+    type: string
+    constraints:
+    - custom_constraint: neutron.network
+
+  subnet:
+    description: >
+      The name or ID of the internal subnet
+    type: string
+    constraints:
+    - custom_constraint: neutron.subnet
+
+  security_groups:
+    description: List of security groups
+    type: comma_delimited_list
+
+  hostname:
+    description: The hostname
+    type: string
+    # default: bastion
+
+  domain_name:
+    type: string
+    description: >
+      Domain name for instances
+    # default: test.com
+
+  flavor:
+    type: string
+    description: >
+      Flavor for the server
+    # default: s2.large.1
+    constraints:
+      - custom_constraint: nova.flavor
+
+  image:
+    type: string
+    description: >
+      Image for the server
+    # default: Standard_Fedora_29_latest
+    constraints:
+      - custom_constraint: glance.image
+
+  keypair_name:
+    type: string
+    description: >
+      KeyPair for the server
+    constraints:
+      - custom_constraint: nova.keypair
+
+  root_volume_size:
+    type: number
+    description: >
+      Size of the root partition for server
+    default: 10
+    constraints:
+
+  ssh_user:
+    type: string
+    description: >
+      SSH user for the connection to the server
+    default: linux
+
+  metadata:
+    type: json
+    description: server metadata
+
+  common_role_name:
+    type: string
+    description: Ansible-galaxy name of the common role
+
+resources:
+
+  server:
+    type: Heat::OTC::Server
+    properties:
+      hostname: { get_param: hostname }
+      domain_name: { get_param: domain_name }
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      keypair_name: { get_param: keypair_name }
+      root_volume_size: { get_param: root_volume_size }
+      metadata: { get_param: metadata }
+      subnet: { get_param: subnet }
+      network: { get_param: net }
+      security_groups: { get_param: security_groups }
+
+  floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: external_network }
+      port_id: { get_attr: [ server, port ] }
+
+  roles_pull_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      inputs:
+        - name: galaxy_roles
+          type: CommaDelimitedList
+          description: List of galaxy roles to fetch
+      outputs:
+        - name: result
+      config: |
+        #!/bin/bash
+
+        roles=${galaxy_roles//[\"\[\]]/}
+        IFS=","
+        for role in $roles; do
+          echo "Installing galaxy role: ${role}"
+          ansible-galaxy install ${role}
+        done
+
+  roles_pull_deployment:
+    type: OS::Heat::SoftwareDeployment
+    depends_on: server
+    properties:
+      signal_transport: TEMP_URL_SIGNAL
+      config: { get_resource: roles_pull_config }
+      input_values:
+        galaxy_roles:
+          - { get_param: common_role_name }
+      server: { get_attr: [ server, id ] }
+
+  roles_apply_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ansible
+      inputs:
+        - name: common_role_name
+      config: |
+        ---
+        - name: Apply Bastion Role
+          hosts: localhost
+          connection: local
+          roles:
+           - { role: "{{common_role_name}}", enable_ssh_tcp_forwarding: true }
+
+  roles_apply_deployment:
+    type: OS::Heat::SoftwareDeployment
+    depends_on: roles_pull_deployment
+    properties:
+      signal_transport: TEMP_URL_SIGNAL
+      config: { get_resource: roles_apply_config}
+      input_values:
+        common_role_name: { get_param: common_role_name}
+      server: { get_attr: [ server, id ]}
+
+outputs:
+  OS::stack_id:
+    value: { get_resource: server }
+  server:
+    description: bastion information
+    value: { get_attr: [ server ] }
+  public_ip:
+    description: Public IP of the server
+    value: { get_attr: [ floating_ip, floating_ip_address ] }
+  roles_pull_deployment:
+    description: output of the roles_pull deployment
+    value:
+      deploy_status_code: { get_attr: [roles_pull_deployment, deploy_status_code] }
+      deploy_stderr: { get_attr: [roles_pull_deployment, deploy_stderr] }
+      deploy_stdout: { get_attr: [roles_pull_deployment, deploy_stdout] }
+  roles_apply_deployment:
+    description: output of the roles_apply deployment
+    value:
+      deploy_status_code: { get_attr: [roles_apply_deployment, deploy_status_code] }
+      deploy_stderr: { get_attr: [roles_apply_deployment, deploy_stderr] }
+      deploy_stdout: { get_attr: [roles_apply_deployment, deploy_stdout] }

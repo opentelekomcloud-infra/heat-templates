@@ -1,0 +1,196 @@
+---
+# Heat stack with VPC, BastionServer, AWX
+
+heat_template_version: 2016-04-08
+
+description:
+  Heat stack with VPC, BastionServer and AWX instance
+  The instances are created with Heat and then configured with Ansible
+
+parameters:
+
+  prefix:
+    type: string
+    description: Prefix for naming resources
+    default: test-
+
+  # Connectivity
+  external_network:
+    type: string
+    description: >
+      The external network that provides floating IP addresses for the nodes
+    default: admin_external_net
+    constraints:
+    - custom_constraint: neutron.network
+
+  subnet_cidr:
+    type: string
+    description: CIDR for the default subnetwork in the VPC
+    default: 192.168.11.0/24
+
+  dns_nameservers:
+    type: comma_delimited_list
+    description: Default DNS servers in the VPC
+    default: ['100.125.4.25', '8.8.8.8']
+
+  domain_name:
+    type: string
+    description: >
+      Domain name for instances
+    default: test.com
+
+  bastion_flavor:
+    type: string
+    description: >
+      Flavor for the bastion server
+    default: s2.large.1
+    constraints:
+      - custom_constraint: nova.flavor
+
+  bastion_image:
+    type: string
+    description: >
+      Image for the bastion server
+    default: Standard_Fedora_29_latest
+    constraints:
+      - custom_constraint: glance.image
+
+  bastion_keypair_name:
+    type: string
+    description: >
+      KeyPair for the bastion server
+    hidden: True
+    constraints:
+      - custom_constraint: nova.keypair
+
+  bastion_root_volume_size:
+    type: number
+    description: >
+      Size of the root partition for Bastion server
+    default: 10
+    constraints:
+
+  bastion_ssh_user:
+    type: string
+    description: >
+      SSH user for the connection to the server
+    default: linux
+
+  awx_flavor:
+    type: string
+    description: >
+      Flavor for the awx server
+    default: s2.xlarge.2
+    constraints:
+      - custom_constraint: nova.flavor
+
+  awx_image:
+    type: string
+    description: >
+      Image for the awx server
+    default: Standard_Fedora_29_latest
+    constraints:
+      - custom_constraint: glance.image
+
+  awx_keypair_name:
+    type: string
+    description: >
+      KeyPair for the awx server
+    hidden: true
+    constraints:
+      - custom_constraint: nova.keypair
+
+  awx_root_volume_size:
+    type: number
+    description: >
+      Size of the root partition for awx server
+    default: 10
+    constraints:
+
+  awx_ssh_user:
+    type: string
+    description: >
+      SSH user for the connection to the server
+    default: linux
+
+  awx_config_repo:
+    type: string
+    description: git repo of the AWX configuration (will be polled periodically)
+    default: "https://github.com/opentelekomcloud-infra/awx"
+
+  common_role_name:
+    type: string
+    description: Galaxy role to be applied to each server
+    default: otc.server_common
+
+resources:
+
+  vpc:
+    type: Heat::OTC::VPC
+    properties:
+      prefix: { get_param: prefix }
+      external_network: { get_param: external_network }
+      dns_nameservers: {get_param: dns_nameservers}
+      subnet_cidr: { get_param: subnet_cidr }
+
+  sg:
+    type: sec_grp.yaml
+
+  bastion:
+    type: bastion.yaml
+    properties:
+      hostname: bastion
+      domain_name: { get_param: domain_name }
+      net: { get_attr: [vpc, network] }
+      subnet: { get_attr: [vpc, subnet] }
+      external_network: { get_param: external_network }
+      image: { get_param: bastion_image }
+      flavor: { get_param: bastion_flavor }
+      keypair_name: { get_param: bastion_keypair_name }
+      ssh_user: { get_param: bastion_ssh_user }
+      root_volume_size: { get_param: bastion_root_volume_size }
+      security_groups:
+        - { get_attr: [sg, common-secgrp] }
+        - { get_attr: [sg, bastion-secgrp] }
+      metadata:
+        groups:
+          - bastion
+          - { get_param: domain_name }
+        host-type: bastion
+        sub-host-type: bastion
+        ansible_user: { get_param: bastion_ssh_user }
+      common_role_name: { get_param: common_role_name }
+
+  awx:
+    type: awx.yaml
+    properties:
+      hostname: awx
+      domain_name: { get_param: domain_name }
+      net: { get_attr: [vpc, network] }
+      subnet: { get_attr: [vpc, subnet] }
+      image: { get_param: awx_image }
+      flavor: { get_param: awx_flavor }
+      keypair_name: { get_param: awx_keypair_name }
+      ssh_user: { get_param: awx_ssh_user }
+      root_volume_size: { get_param: awx_root_volume_size }
+      security_groups:
+        - { get_attr: [sg, common-secgrp] }
+        - { get_attr: [sg, awx-secgrp] }
+      metadata:
+        groups:
+          - awx
+          - { get_param: domain_name }
+        host-type: awx
+        sub-host-type: awx
+        ansible_user: { get_param: awx_ssh_user }
+      awx_config_repo: { get_param: awx_config_repo }
+      common_role_name: { get_param: common_role_name }
+
+
+outputs:
+  bastion:
+    description: Bastion server information
+    value: { get_attr: [ bastion ]}
+  awx:
+    description: AWX server information
+    value: { get_attr: [ awx ]}
